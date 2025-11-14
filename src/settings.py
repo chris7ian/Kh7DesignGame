@@ -66,6 +66,13 @@ GROUND_HEIGHT = 20  # altura del suelo base
 LANDING_DISTANCE = 50  # distancia máxima desde el suelo para poder aterrizar
 BOARDING_DISTANCE = 120  # distancia máxima del astronauta a la nave para poder abordar
 
+# Opacidad de fondos (0-255, donde 255 es completamente opaco)
+BACKGROUND_OPACITY = 90  # Opacidad de las imágenes de fondo (70% aproximadamente)
+# 180 = 70% opaco (actual, más sutil)
+# 150 = 60% opaco (más transparente)
+# 200 = 80% opaco (menos transparente)
+# 255 = completamente opaco (sin transparencia)
+
 # Dificultad
 DIFFICULTY_STEP = 0.02  # reducción del intervalo de generación
 DIFFICULTY_MIN_INTERVAL = 0.35
@@ -74,6 +81,7 @@ DIFFICULTY_MIN_INTERVAL = 0.35
 BASE_PATH = pathlib.Path(__file__).resolve().parent.parent
 ASSETS_PATH = BASE_PATH / "assets"
 FONTS_PATH = ASSETS_PATH / "fonts"
+IMAGES_PATH = ASSETS_PATH / "images"
 DEFAULT_FONT = "PressStart2P.ttf"  # deberá agregarse manualmente si se desea
 
 # Varios

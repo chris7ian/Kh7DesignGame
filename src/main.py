@@ -149,6 +149,10 @@ class Game:
         self.music_loaded = self._load_music("space_theme.ogg")
         if self.music_loaded:
             pygame.mixer.music.play(-1)
+        
+        # Cargar fondos
+        self.space_background = self._load_background("space_background.png")
+        self.cyberpunk_background = self._load_background("cyberpunk_background.png")
 
     def _load_sound(self, filename: str):
         path = settings.ASSETS_PATH / "sounds" / filename
@@ -169,6 +173,34 @@ class Game:
             return True
         except pygame.error:
             return False
+    
+    def _load_background(self, filename: str) -> pygame.Surface | None:
+        """Carga una imagen de fondo y la escala al tamaño de la pantalla con opacidad"""
+        path = settings.ASSETS_PATH / "images" / filename
+        if not path.exists():
+            print(f"No se encontró la imagen {filename} en {path}")
+            return None
+        try:
+            image = pygame.image.load(path.as_posix())
+            # Escalar la imagen al tamaño de la pantalla
+            scaled = pygame.transform.scale(image, (settings.WIDTH, settings.HEIGHT))
+            
+            # Aplicar opacidad si la imagen tiene canal alpha, sino crear una superficie con alpha
+            if scaled.get_flags() & pygame.SRCALPHA:
+                # La imagen ya tiene canal alpha, ajustar opacidad
+                scaled.set_alpha(settings.BACKGROUND_OPACITY)
+            else:
+                # Convertir a superficie con alpha y aplicar opacidad
+                temp_surface = pygame.Surface(scaled.get_size(), pygame.SRCALPHA)
+                temp_surface.blit(scaled, (0, 0))
+                temp_surface.set_alpha(settings.BACKGROUND_OPACITY)
+                scaled = temp_surface
+            
+            print(f"Fondo {filename} cargado correctamente desde {path} con opacidad {settings.BACKGROUND_OPACITY}")
+            return scaled
+        except pygame.error as e:
+            print(f"Error cargando imagen {filename} desde {path}: {e}")
+            return None
 
     def _can_reach(self, from_rect: pygame.Rect, to_rect: pygame.Rect, max_jump_height: float, max_jump_distance: float) -> bool:
         """Verifica si se puede alcanzar una plataforma desde otra"""
@@ -626,19 +658,31 @@ class Game:
 
     def draw_background(self) -> None:
         if self.game_mode == GameMode.SHIP:
+            # Dibujar fondo base primero
             self.play_surface.fill(settings.COLOR_BG)
-            for x, y, speed in self.stars:
-                size = 3 if speed > 110 else 2
-                if y < settings.HEIGHT:
-                    self.play_surface.fill((255, 255, 255), (int(x), int(y), size, size))
+            
+            # Dibujar fondo espacial con opacidad si está disponible
+            if self.space_background:
+                self.play_surface.blit(self.space_background, (0, 0))
+            else:
+                # Fallback: estrellas animadas
+                for x, y, speed in self.stars:
+                    size = 3 if speed > 110 else 2
+                    if y < settings.HEIGHT:
+                        self.play_surface.fill((255, 255, 255), (int(x), int(y), size, size))
         else:
-            # Fondo para modo plataformas (cielo espacial más oscuro)
+            # Dibujar fondo base primero
             self.play_surface.fill((10, 10, 25))
-            # Estrellas más tenues
-            for x, y, speed in self.stars:
-                size = 2 if speed > 110 else 1
-                if y < settings.HEIGHT - settings.GROUND_HEIGHT:
-                    self.play_surface.fill((150, 150, 150), (int(x), int(y), size, size))
+            
+            # Dibujar fondo cyberpunk con opacidad si está disponible
+            if self.cyberpunk_background:
+                self.play_surface.blit(self.cyberpunk_background, (0, 0))
+            else:
+                # Fallback: estrellas tenues
+                for x, y, speed in self.stars:
+                    size = 2 if speed > 110 else 1
+                    if y < settings.HEIGHT - settings.GROUND_HEIGHT:
+                        self.play_surface.fill((150, 150, 150), (int(x), int(y), size, size))
 
     def draw_footer(self) -> None:
         footer_rect = pygame.Rect(0, settings.HEIGHT, settings.WIDTH, settings.FOOTER_HEIGHT)
