@@ -66,7 +66,7 @@ class Player:
 
     def update(self, dt: float, directions: Vec2) -> None:
         movement = directions * self.speed * dt
-        max_x = max(0, int(settings.WIDTH * 0.4) - self.rect.width)
+        max_x = settings.WIDTH - self.rect.width
         new_x = max(0, min(max_x, self.rect.x + movement.x))
         new_y = max(0, min(settings.HEIGHT - self.rect.height, self.rect.y + movement.y))
         self.rect.x = int(new_x)
@@ -138,6 +138,7 @@ class MeteorSpawner:
         self.spawn_interval = settings.METEOR_SPAWN_INTERVAL
         self.timer = 0.0
         self.meteors: List[Meteor] = []
+        self.level_config = None  # Se configurará desde el juego
 
     def update(self, dt: float) -> None:
         self.timer += dt
@@ -158,7 +159,16 @@ class MeteorSpawner:
         buffer = max(60, int(settings.MINIMAP_WORLD_EXTRA * 0.4))
         x += random.randint(-buffer, buffer)
         y = random.randint(0, settings.HEIGHT - h)
-        vx = -random.uniform(settings.METEOR_MIN_SPEED, settings.METEOR_MAX_SPEED)
+        
+        # Usar velocidad del nivel si está configurado, sino usar valores por defecto
+        if self.level_config:
+            min_speed = self.level_config.meteor_min_speed
+            max_speed = self.level_config.meteor_max_speed
+        else:
+            min_speed = settings.METEOR_MIN_SPEED
+            max_speed = settings.METEOR_MAX_SPEED
+        
+        vx = -random.uniform(min_speed, max_speed)
         vy = random.uniform(-60, 60)
         rect = Rect(x, y, w, h)
         velocity = Vec2(vx, vy)
@@ -372,13 +382,13 @@ class Astronaut:
 
 
 class Alien:
-    def __init__(self, position: Tuple[int, int], platform: Platform) -> None:
+    def __init__(self, position: Tuple[int, int], platform: Platform, speed: float = None) -> None:
         w, h = settings.ALIEN_SIZE
         self.rect = Rect(0, 0, w, h)
         self.rect.centerx = position[0]
         self.rect.bottom = platform.rect.top
         self.platform = platform
-        self.speed = settings.ALIEN_SPEED
+        self.speed = speed if speed is not None else settings.ALIEN_SPEED
         self.direction = 1  # 1 = derecha, -1 = izquierda
         self.start_x = self.rect.centerx
         self.patrol_distance = settings.ALIEN_PATROL_DISTANCE
@@ -388,20 +398,38 @@ class Alien:
         if not self.alive:
             return
         
-        # Movimiento de patrulla
-        self.rect.x += self.direction * self.speed * dt
+        # Calcular movimiento
+        movement = self.direction * self.speed * dt
+        new_x = self.rect.x + movement
         
-        # Cambiar dirección si alcanza el límite de patrulla
-        distance_traveled = abs(self.rect.centerx - self.start_x)
-        if distance_traveled >= self.patrol_distance:
-            self.direction *= -1
-            # Asegurar que no se salga de la plataforma
-            if self.rect.left < self.platform.rect.left:
-                self.rect.left = self.platform.rect.left
-                self.direction = 1
-            elif self.rect.right > self.platform.rect.right:
-                self.rect.right = self.platform.rect.right
-                self.direction = -1
+        # Verificar límites de la plataforma ANTES de mover
+        platform_left = self.platform.rect.left
+        platform_right = self.platform.rect.right
+        
+        # Calcular nueva posición considerando el ancho del alien
+        new_left = new_x
+        new_right = new_x + self.rect.width
+        
+        # Verificar si el movimiento haría que el alien se salga de la plataforma
+        if new_left < platform_left:
+            # Limitar al borde izquierdo
+            self.rect.left = platform_left
+            self.direction = 1  # Cambiar dirección a derecha
+            self.start_x = self.rect.centerx  # Resetear punto de inicio
+        elif new_right > platform_right:
+            # Limitar al borde derecho
+            self.rect.right = platform_right
+            self.direction = -1  # Cambiar dirección a izquierda
+            self.start_x = self.rect.centerx  # Resetear punto de inicio
+        else:
+            # Movimiento válido, aplicar
+            self.rect.x = new_x
+            
+            # Verificar si alcanza el límite de patrulla (solo si no está en un borde)
+            distance_traveled = abs(self.rect.centerx - self.start_x)
+            if distance_traveled >= self.patrol_distance:
+                self.direction *= -1
+                self.start_x = self.rect.centerx  # Resetear punto de inicio
 
     def draw(self, surface: pygame.Surface) -> None:
         if not self.alive:

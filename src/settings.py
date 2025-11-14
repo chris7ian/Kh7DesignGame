@@ -62,8 +62,8 @@ COLOR_ALIEN = (200, 50, 50)
 
 # Configuración de plataformas
 PLATFORM_COLOR = (120, 100, 80)
-GROUND_HEIGHT = 50  # altura del suelo base
-LANDING_DISTANCE = 100  # distancia máxima desde el suelo para poder aterrizar
+GROUND_HEIGHT = 20  # altura del suelo base
+LANDING_DISTANCE = 50  # distancia máxima desde el suelo para poder aterrizar
 BOARDING_DISTANCE = 120  # distancia máxima del astronauta a la nave para poder abordar
 
 # Dificultad

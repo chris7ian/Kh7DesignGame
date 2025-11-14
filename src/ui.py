@@ -60,15 +60,43 @@ class HUD:
             surface.blit(shadow_render, shadow_rect)
         surface.blit(render, rect)
 
-    def draw_hud(self, surface: pygame.Surface, score: int, lives: int, *, footer: bool = False) -> None:
+    def draw_hud(self, surface: pygame.Surface, score: int, lives: int, level: int = 1, *, footer: bool = False) -> None:
         if footer:
             base_y = settings.HEIGHT + settings.FOOTER_HEIGHT // 2
             offset = 28
             self.draw_text(surface, f"Puntuación: {score}", (40, base_y - offset), size=22)
             self.draw_text(surface, f"Vidas: {lives}", (40, base_y + offset), size=22)
+            self.draw_text(surface, f"Nivel: {level}", (40, base_y + offset * 2), size=22, color=(150, 200, 255))
         else:
             self.draw_text(surface, f"Puntuación: {score}", (20, 20))
             self.draw_text(surface, f"Vidas: {lives}", (20, 60))
+            self.draw_text(surface, f"Nivel: {level}", (20, 100), color=(150, 200, 255))
+    
+    def draw_objectives(self, surface: pygame.Surface, meteors_destroyed: int, required_meteors: int, 
+                       aliens_alive: int, total_aliens: int, current_wave: int, total_waves: int) -> None:
+        """Muestra el progreso de los objetivos del nivel"""
+        base_y = settings.HEIGHT + settings.FOOTER_HEIGHT // 2
+        offset = 28
+        
+        # Calcular ancho del minimapa para evitar superposición
+        minimap_width = int(settings.WIDTH * settings.MINIMAP_SCALE)
+        minimap_left = (settings.WIDTH - minimap_width) // 2
+        minimap_right = minimap_left + minimap_width
+        
+        # Objetivos en el lado derecho del footer, asegurándose de estar fuera del minimapa
+        x_pos = max(settings.WIDTH - 320, minimap_right + 20)
+        
+        # Progreso de meteoritos (más arriba para evitar superposición con otros textos)
+        meteors_color = (100, 255, 100) if meteors_destroyed >= required_meteors else (255, 255, 255)
+        meteors_text = f"Meteoritos: {meteors_destroyed}/{required_meteors}"
+        if total_waves > 1:
+            meteors_text += f" (Oleada {current_wave + 1}/{total_waves})"
+        self.draw_text(surface, meteors_text, (x_pos, base_y - offset * 1.5), size=18, center=False, color=meteors_color)
+        
+        # Progreso de aliens (en la misma línea que Vidas para alineación)
+        aliens_killed = total_aliens - aliens_alive
+        aliens_color = (100, 255, 100) if aliens_alive == 0 else (255, 255, 255)
+        self.draw_text(surface, f"Aliens: {aliens_killed}/{total_aliens}", (x_pos, base_y + offset * 0.5), size=18, center=False, color=aliens_color)
 
     def draw_center_message(self, surface: pygame.Surface, title: str, company: Optional[str] = None,subtitle: Optional[str] = None) -> None:
         if company:

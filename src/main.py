@@ -32,6 +32,71 @@ class GameMode(Enum):
     PLATFORMER = auto()
 
 
+class LevelConfig:
+    """Configuración de un nivel"""
+    def __init__(
+        self,
+        level: int,
+        alien_count: int,
+        alien_speed: float,
+        meteor_spawn_interval: float,
+        meteor_min_speed: float,
+        meteor_max_speed: float,
+        required_meteors: int = 0,
+        meteor_waves: int = 1,
+    ):
+        self.level = level
+        self.alien_count = alien_count
+        self.alien_speed = alien_speed
+        self.meteor_spawn_interval = meteor_spawn_interval
+        self.meteor_min_speed = meteor_min_speed
+        self.meteor_max_speed = meteor_max_speed
+        self.required_meteors = required_meteors  # Meteoritos que deben destruirse
+        self.meteor_waves = meteor_waves  # Número de oleadas de meteoritos
+        self.meteors_destroyed = 0  # Contador de meteoritos destruidos
+    
+    @staticmethod
+    def get_level_config(level: int) -> "LevelConfig":
+        """Obtiene la configuración para un nivel específico"""
+        # Dificultad progresiva para meteoritos
+        base_interval = settings.METEOR_SPAWN_INTERVAL
+        interval_reduction = min(0.3, level * 0.05)  # Reducir intervalo hasta un mínimo
+        spawn_interval = max(0.3, base_interval - interval_reduction)
+        
+        # Velocidad de meteoritos aumenta con el nivel
+        base_min_speed = settings.METEOR_MIN_SPEED
+        base_max_speed = settings.METEOR_MAX_SPEED
+        meteor_speed_increase = level * 20  # Aumentar velocidad con el nivel (más agresivo)
+        min_speed = base_min_speed + meteor_speed_increase
+        max_speed = base_max_speed + meteor_speed_increase
+        
+        # Más aliens en niveles superiores
+        alien_count = min(8, 3 + level)  # Empezar con 3, máximo 8
+        
+        # Velocidad de aliens aumenta con el nivel
+        base_alien_speed = settings.ALIEN_SPEED
+        alien_speed_increase = level * 10  # Aumentar velocidad con el nivel
+        alien_speed = base_alien_speed + alien_speed_increase
+        
+        # Meteoritos requeridos según el nivel (objetivo del nivel)
+        # Niveles iniciales: menos meteoritos, niveles avanzados: más
+        required_meteors = max(5, 5 + level * 2)  # Mínimo 5, aumenta con el nivel
+        
+        # Número de oleadas de meteoritos
+        meteor_waves = 1 + (level - 1) // 3  # Más oleadas en niveles superiores
+        
+        return LevelConfig(
+            level=level,
+            alien_count=alien_count,
+            alien_speed=alien_speed,
+            meteor_spawn_interval=spawn_interval,
+            meteor_min_speed=min_speed,
+            meteor_max_speed=max_speed,
+            required_meteors=required_meteors,
+            meteor_waves=meteor_waves,
+        )
+
+
 class Game:
     def __init__(self) -> None:
         pygame.init()
@@ -69,8 +134,15 @@ class Game:
         self.score = 0
         self.lives = 3
         self.time_accumulator = 0.0
+        self.level = 1
+        self.level_config = LevelConfig.get_level_config(1)
+        self.level_complete_timer = 0.0
+        self.level_complete_message_duration = 3.0
+        self.current_wave = 0
+        self.meteors_in_wave = 0
+        self.wave_complete = False
         self._reset_starfield()
-        self._create_aliens()
+        self._setup_level()
 
         self.shoot_sound = self._load_sound("laser.wav")
         self.explosion_sound = self._load_sound("explosion.wav")
@@ -98,72 +170,205 @@ class Game:
         except pygame.error:
             return False
 
-    def _create_platforms(self) -> list[entities.Platform]:
-        """Crea las plataformas del nivel"""
+    def _can_reach(self, from_rect: pygame.Rect, to_rect: pygame.Rect, max_jump_height: float, max_jump_distance: float) -> bool:
+        """Verifica si se puede alcanzar una plataforma desde otra"""
+        # Calcular distancia horizontal y vertical
+        dx = abs((to_rect.centerx - from_rect.centerx))
+        dy = from_rect.top - to_rect.top  # Positivo si to_rect está arriba
+        
+        # Verificar si está dentro del alcance del salto
+        return dx <= max_jump_distance and dy >= 0 and dy <= max_jump_height
+    
+    def _create_platforms(self, level: int = 1) -> list[entities.Platform]:
+        """Genera plataformas de forma procedural asegurando rutas alcanzables"""
         platforms = []
         
-        # Suelo base
+        # Suelo base (siempre igual)
         ground = entities.Platform(
             pygame.Rect(0, settings.HEIGHT - settings.GROUND_HEIGHT, settings.WIDTH, settings.GROUND_HEIGHT),
             settings.PLATFORM_COLOR
         )
         platforms.append(ground)
         
-        # Plataformas adicionales
-        platform_data = [
-            (100, 450, 200, 20),
-            (350, 380, 150, 20),
-            (550, 300, 180, 20),
-            (200, 250, 120, 20),
-            (450, 180, 200, 20),
-        ]
+        # Usar el nivel como semilla para consistencia
+        random.seed(level * 42)
         
-        for x, y, w, h in platform_data:
-            platform = entities.Platform(
-                pygame.Rect(x, y, w, h),
-                settings.PLATFORM_COLOR
-            )
+        # Parámetros del salto del astronauta (basados en física del juego)
+        # Altura máxima de salto aproximada: v²/(2*g) donde v=600, g=800
+        max_jump_height = (settings.ASTRONAUT_JUMP_STRENGTH ** 2) / (2 * settings.ASTRONAUT_GRAVITY)
+        # Distancia horizontal máxima aproximada (considerando tiempo de vuelo)
+        max_jump_distance = max_jump_height * 1.5  # Factor de seguridad
+        
+        # Número de plataformas según el nivel
+        num_platforms = 5 + min(4, level // 2)
+        
+        ground_level = settings.HEIGHT - settings.GROUND_HEIGHT
+        min_y = 120
+        max_y = ground_level - 60
+        
+        # Generar plataformas en capas verticales
+        platform_rects = []
+        
+        # Capa 1: Plataformas cerca del suelo (accesibles desde el suelo)
+        layer1_count = max(2, num_platforms // 3)
+        for i in range(layer1_count):
+            y = ground_level - random.randint(80, 140)
+            x = random.randint(40, settings.WIDTH - 180)
+            w = random.randint(120, 200)
+            if x + w > settings.WIDTH - 20:
+                w = settings.WIDTH - x - 20
+            platform_rects.append(pygame.Rect(x, y, w, 20))
+        
+        # Capas superiores: generar proceduralmente asegurando conectividad
+        remaining_platforms = num_platforms - layer1_count
+        layers = []
+        
+        # Dividir el espacio vertical en capas
+        num_layers = min(4, max(2, remaining_platforms // 2))
+        layer_height = (max_y - min_y) / num_layers
+        
+        for layer_idx in range(num_layers):
+            layer_y_base = min_y + layer_height * layer_idx
+            layer_y_range = layer_height * 0.6  # Variación dentro de la capa
+            layers.append((layer_y_base, layer_y_range))
+        
+        # Generar plataformas en cada capa asegurando conectividad
+        for layer_idx, (layer_y_base, layer_y_range) in enumerate(layers):
+            platforms_in_layer = remaining_platforms // num_layers
+            if layer_idx == num_layers - 1:
+                platforms_in_layer += remaining_platforms % num_layers
+            
+            for _ in range(platforms_in_layer):
+                attempts = 0
+                max_attempts = 50
+                valid_platform = False
+                
+                while not valid_platform and attempts < max_attempts:
+                    attempts += 1
+                    
+                    # Generar posición y tamaño
+                    y = int(layer_y_base + random.uniform(-layer_y_range/2, layer_y_range/2))
+                    y = max(min_y, min(max_y, y))
+                    
+                    x = random.randint(30, settings.WIDTH - 150)
+                    w = random.randint(100, 220)
+                    if x + w > settings.WIDTH - 20:
+                        w = settings.WIDTH - x - 20
+                    
+                    new_rect = pygame.Rect(x, y, w, 20)
+                    
+                    # Verificar que no se solape con plataformas existentes
+                    overlaps = False
+                    for existing in platform_rects:
+                        if new_rect.colliderect(existing):
+                            overlaps = True
+                            break
+                    
+                    if overlaps:
+                        continue
+                    
+                    # Verificar conectividad: debe ser alcanzable desde al menos una plataforma existente
+                    # o desde el suelo si es la primera capa
+                    reachable = False
+                    
+                    if layer_idx == 0:
+                        # Primera capa: debe ser alcanzable desde el suelo
+                        ground_rect = pygame.Rect(0, ground_level, settings.WIDTH, 1)
+                        reachable = self._can_reach(ground_rect, new_rect, max_jump_height, max_jump_distance)
+                    else:
+                        # Capas superiores: debe ser alcanzable desde al menos una plataforma anterior
+                        for existing in platform_rects:
+                            if self._can_reach(existing, new_rect, max_jump_height, max_jump_distance):
+                                reachable = True
+                                break
+                    
+                    if reachable:
+                        platform_rects.append(new_rect)
+                        valid_platform = True
+                
+                # Si no se encontró una plataforma válida después de muchos intentos,
+                # crear una garantizada conectada a la última plataforma
+                if not valid_platform and platform_rects:
+                    last_platform = platform_rects[-1]
+                    y = int(layer_y_base)
+                    # Posicionar cerca de la última plataforma pero alcanzable
+                    x_offset = random.randint(-int(max_jump_distance * 0.7), int(max_jump_distance * 0.7))
+                    x = max(30, min(settings.WIDTH - 150, last_platform.centerx + x_offset))
+                    w = random.randint(100, 180)
+                    if x + w > settings.WIDTH - 20:
+                        w = settings.WIDTH - x - 20
+                    
+                    new_rect = pygame.Rect(x, y, w, 20)
+                    # Verificar solapamiento
+                    overlaps = any(new_rect.colliderect(p) for p in platform_rects)
+                    if not overlaps:
+                        platform_rects.append(new_rect)
+        
+        # Crear las plataformas
+        for rect in platform_rects:
+            platform = entities.Platform(rect, settings.PLATFORM_COLOR)
             platforms.append(platform)
         
         return platforms
 
-    def _create_aliens(self) -> None:
-        """Crea aliens en algunas plataformas"""
+    def _create_aliens(self, level_config: LevelConfig) -> None:
+        """Crea aliens en algunas plataformas según la configuración del nivel"""
         self.aliens.clear()
-        # Añadir aliens a algunas plataformas (excluyendo el suelo base)
-        platform_data = [
-            (100, 450, 200, 20),
-            (350, 380, 150, 20),
-            (550, 300, 180, 20),
-            (200, 250, 120, 20),
-            (450, 180, 200, 20),
-        ]
+        # Obtener todas las plataformas excepto el suelo base
+        available_platforms = [p for p in self.platforms if p.rect.y < settings.HEIGHT - settings.GROUND_HEIGHT]
         
-        # Añadir aliens a algunas plataformas específicas
-        alien_platform_indices = [1, 2, 4]  # Índices de plataformas que tendrán aliens
+        if not available_platforms:
+            return
         
-        for idx in alien_platform_indices:
-            if idx < len(platform_data):
-                x, y, w, h = platform_data[idx]
-                # Encontrar la plataforma correspondiente
-                for platform in self.platforms:
-                    if platform.rect.x == x and platform.rect.y == y:
-                        # Crear alien en el centro de la plataforma
-                        alien = entities.Alien((x + w // 2, y), platform)
-                        self.aliens.append(alien)
-                        break
+        # Seleccionar plataformas aleatorias para aliens
+        num_aliens = min(level_config.alien_count, len(available_platforms))
+        selected_platforms = random.sample(available_platforms, num_aliens)
+        
+        for platform in selected_platforms:
+            # Crear alien en el centro de la plataforma con velocidad del nivel
+            alien = entities.Alien((platform.rect.centerx, platform.rect.y), platform, level_config.alien_speed)
+            self.aliens.append(alien)
+    
+    def _setup_level(self) -> None:
+        """Configura el nivel actual"""
+        self.level_config = LevelConfig.get_level_config(self.level)
+        self.platforms = self._create_platforms(self.level)
+        self._create_aliens(self.level_config)
+        
+        # Configurar spawner de meteoritos según el nivel
+        self.meteor_spawner.spawn_interval = self.level_config.meteor_spawn_interval
+        self.meteor_spawner.level_config = self.level_config
+        
+        # Resetear variables de oleadas y objetivos
+        self.level_config.meteors_destroyed = 0
+        self.current_wave = 0
+        self.meteors_in_wave = 0
+        self.wave_complete = False
+        self.meteor_spawner.meteors.clear()  # Limpiar meteoritos anteriores
+        
+        # Resetear posición del jugador
+        if self.game_mode == GameMode.SHIP:
+            self.player.rect.center = (int(settings.WIDTH * 0.15), settings.HEIGHT // 2)
+        else:
+            ground_level = settings.HEIGHT - settings.GROUND_HEIGHT
+            self.astronaut.rect.x = settings.WIDTH // 2
+            self.astronaut.rect.y = ground_level - self.astronaut.rect.height
+            self.astronaut.velocity = pygame.math.Vector2(0, 0)
+        
+        self.level_complete_timer = 0.0
 
     def reset(self) -> None:
         self.game_mode = GameMode.SHIP
         self.player = entities.Player((int(settings.WIDTH * 0.15), settings.HEIGHT // 2))
         self.astronaut = entities.Astronaut((settings.WIDTH // 2, 100))
         self.meteor_spawner = entities.MeteorSpawner()
-        self.platforms = self._create_platforms()
-        self._create_aliens()
         self.score = 0
         self.lives = 3
         self.time_accumulator = 0.0
+        self.level = 1
+        self.level_complete_timer = 0.0
         self._reset_starfield()
+        self._setup_level()
 
     def handle_menu_input(self) -> None:
         for event in pygame.event.get():
@@ -270,7 +475,53 @@ class Game:
         if self.game_mode == GameMode.SHIP:
             directions = self.handle_ship_input()
             self.player.update(dt, directions)
-            self.meteor_spawner.update(dt)
+            
+            # Generar meteoritos hasta alcanzar el objetivo requerido
+            # Las oleadas son solo organizativas, no bloquean el progreso
+            meteors_destroyed = self.level_config.meteors_destroyed
+            required_meteors = self.level_config.required_meteors
+            
+            # Solo generar meteoritos si aún no se ha alcanzado el objetivo
+            if meteors_destroyed < required_meteors:
+                # Si la oleada actual está completa y no hay meteoritos, avanzar a la siguiente oleada
+                if self.wave_complete and len(self.meteor_spawner.meteors) == 0:
+                    if self.current_wave < self.level_config.meteor_waves - 1:
+                        # Avanzar a la siguiente oleada
+                        self.current_wave += 1
+                        self.meteors_in_wave = 0
+                        self.wave_complete = False
+                        self.meteor_spawner.timer = 0.0
+                    else:
+                        # Todas las oleadas completadas, pero aún faltan meteoritos
+                        # Resetear para continuar generando
+                        self.meteors_in_wave = 0
+                        self.wave_complete = False
+                
+                # Siempre generar meteoritos si aún faltan por destruir
+                # (sin importar el estado de las oleadas)
+                self.meteor_spawner.update(dt)
+                
+                # Actualizar contador de meteoritos generados en la oleada actual (solo para display)
+                if self.current_wave < self.level_config.meteor_waves:
+                    meteors_per_wave = self.level_config.required_meteors // self.level_config.meteor_waves
+                    if self.current_wave == self.level_config.meteor_waves - 1:
+                        meteors_per_wave += self.level_config.required_meteors % self.level_config.meteor_waves
+                    
+                    # Contar meteoritos generados en esta oleada (solo para referencia)
+                    if not self.wave_complete:
+                        current_meteors = len(self.meteor_spawner.meteors)
+                        if current_meteors > self.meteors_in_wave:
+                            self.meteors_in_wave = current_meteors
+                        
+                        # Marcar oleada como completa cuando se hayan generado suficientes
+                        # (pero esto no bloquea la generación si aún faltan meteoritos por destruir)
+                        if self.meteors_in_wave >= meteors_per_wave:
+                            self.wave_complete = True
+            else:
+                # Objetivo alcanzado, solo actualizar meteoritos existentes
+                for meteor in self.meteor_spawner.meteors:
+                    meteor.update(dt)
+                self.meteor_spawner.meteors = [m for m in self.meteor_spawner.meteors if not m.is_offscreen()]
 
             # Colisiones láser - meteorito
             for laser in list(self.player.lasers):
@@ -279,6 +530,8 @@ class Game:
                         self.player.lasers.remove(laser)
                         self.meteor_spawner.meteors.remove(meteor)
                         self.score += 10
+                        # Contar meteorito destruido
+                        self.level_config.meteors_destroyed += 1
                         if self.explosion_sound:
                             self.explosion_sound.play()
                         break
@@ -293,12 +546,6 @@ class Game:
                         if self.lives <= 0:
                             self.state = GameState.GAME_OVER
                     break
-
-            # Incrementar dificultad
-            self.time_accumulator += dt
-            if self.time_accumulator >= 10:
-                self.time_accumulator = 0.0
-                self.meteor_spawner.increase_difficulty()
         
         elif self.game_mode == GameMode.PLATFORMER:
             move_left, move_right, jump, shoot = self.handle_platformer_input()
@@ -337,6 +584,31 @@ class Game:
                     break
             
             # No actualizar ni generar meteoritos en modo plataformas (están en el espacio)
+        
+        # Verificar si el nivel está completo (objetivos combinados)
+        if self.level_complete_timer == 0.0:
+            alive_aliens = sum(1 for alien in self.aliens if alien.alive)
+            meteors_destroyed = self.level_config.meteors_destroyed
+            
+            # El nivel se completa cuando:
+            # 1. Todos los aliens están muertos (modo plataformas)
+            # 2. Se han destruido todos los meteoritos requeridos (modo nave)
+            aliens_complete = alive_aliens == 0
+            meteors_complete = meteors_destroyed >= self.level_config.required_meteors
+            
+            if aliens_complete and meteors_complete:
+                # Nivel completado
+                self.level_complete_timer = self.level_complete_message_duration
+        
+        # Manejar transición de nivel
+        if self.level_complete_timer > 0.0:
+            self.level_complete_timer -= dt
+            if self.level_complete_timer <= 0.0:
+                # Avanzar al siguiente nivel
+                self.level += 1
+                self._setup_level()
+                # Bonus por completar nivel
+                self.score += 50 * self.level
 
     def _reset_starfield(self) -> None:
         for star in self.stars:
@@ -471,6 +743,15 @@ class Game:
                 self.player.lasers = []
                 self.player.draw(target_surface)
                 self.player.lasers = original_lasers
+            
+            # Mostrar mensaje de nivel completado
+            if self.level_complete_timer > 0.0:
+                self.hud.draw_center_message(
+                    target_surface,
+                    f"¡Nivel {self.level} Completado!",
+                    f"Avanzando al Nivel {self.level + 1}...",
+                    None,
+                )
         elif self.state == GameState.PAUSED:
             if self.game_mode == GameMode.SHIP:
                 self.player.draw(target_surface)
@@ -502,9 +783,34 @@ class Game:
         self.draw_footer()
 
         if self.state == GameState.PLAYING:
+            # Dibujar minimapa primero para que los textos queden encima
+            self.draw_minimap()
+            
             mode_text = "Modo: Nave" if self.game_mode == GameMode.SHIP else "Modo: Plataformas"
-            self.hud.draw_hud(self.screen, self.score, self.lives, footer=True)
-            self.hud.draw_text(self.screen, mode_text, (settings.WIDTH - 200, settings.HEIGHT + 10), size=18, center=False)
+            self.hud.draw_hud(self.screen, self.score, self.lives, self.level, footer=True)
+            
+            # Mostrar objetivos del nivel
+            alive_aliens = sum(1 for alien in self.aliens if alien.alive)
+            total_aliens = len(self.aliens)
+            self.hud.draw_objectives(
+                self.screen,
+                self.level_config.meteors_destroyed,
+                self.level_config.required_meteors,
+                alive_aliens,
+                total_aliens,
+                self.current_wave,
+                self.level_config.meteor_waves
+            )
+            
+            # Modo y mensajes de acción en el lado izquierdo del footer para evitar superposición con minimapa
+            footer_center_y = settings.HEIGHT + settings.FOOTER_HEIGHT // 2
+            # Calcular posición izquierda del minimapa para evitar superposición
+            minimap_width = int(settings.WIDTH * settings.MINIMAP_SCALE)
+            minimap_left = (settings.WIDTH - minimap_width) // 2
+            # Colocar textos a la izquierda del minimapa, pero no más a la izquierda que el borde de la pantalla
+            left_text_x = max(40, minimap_left - 200)
+            
+            self.hud.draw_text(self.screen, mode_text, (left_text_x, footer_center_y - 40), size=18, center=False)
             
             if self.game_mode == GameMode.SHIP:
                 # Mostrar si se puede bajar o no
@@ -513,9 +819,9 @@ class Game:
                 is_near_ground = (ground_level - settings.LANDING_DISTANCE <= player_bottom <= settings.HEIGHT)
                 
                 if is_near_ground:
-                    self.hud.draw_text(self.screen, "Presiona E para bajar", (settings.WIDTH - 200, settings.HEIGHT + 35), size=14, center=False, color=(100, 255, 100))
+                    self.hud.draw_text(self.screen, "Presiona E para bajar", (left_text_x, footer_center_y + 10), size=14, center=False, color=(100, 255, 100))
                 else:
-                    self.hud.draw_text(self.screen, "Acércate al suelo para bajar", (settings.WIDTH - 250, settings.HEIGHT + 35), size=12, center=False, color=(255, 150, 150))
+                    self.hud.draw_text(self.screen, "Acércate al suelo para bajar", (left_text_x, footer_center_y + 10), size=12, center=False, color=(255, 150, 150))
             else:
                 # Verificar si el astronauta está cerca de la nave
                 astronaut_center = pygame.math.Vector2(self.astronaut.rect.centerx, self.astronaut.rect.centery)
@@ -523,16 +829,14 @@ class Game:
                 distance = (astronaut_center - ship_center).length()
                 
                 if distance <= settings.BOARDING_DISTANCE:
-                    self.hud.draw_text(self.screen, "Presiona E para volver a la nave", (settings.WIDTH - 280, settings.HEIGHT + 35), size=12, center=False, color=(100, 255, 100))
+                    self.hud.draw_text(self.screen, "Presiona E para volver a la nave", (left_text_x, footer_center_y + 10), size=12, center=False, color=(100, 255, 100))
                 else:
-                    self.hud.draw_text(self.screen, "Acércate a la nave para abordar", (settings.WIDTH - 280, settings.HEIGHT + 35), size=12, center=False, color=(255, 150, 150))
-            
-            self.draw_minimap()
+                    self.hud.draw_text(self.screen, "Acércate a la nave para abordar", (left_text_x, footer_center_y + 10), size=12, center=False, color=(255, 150, 150))
         elif self.state == GameState.PAUSED:
-            self.hud.draw_hud(self.screen, self.score, self.lives, footer=True)
+            self.hud.draw_hud(self.screen, self.score, self.lives, self.level, footer=True)
             self.draw_minimap()
         elif self.state == GameState.GAME_OVER:
-            self.hud.draw_hud(self.screen, self.score, self.lives, footer=True)
+            self.hud.draw_hud(self.screen, self.score, self.lives, self.level, footer=True)
             self.draw_minimap()
 
         pygame.display.flip()
