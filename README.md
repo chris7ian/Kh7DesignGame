@@ -69,12 +69,14 @@ Para generar ejecutables nativos puedes usar [pyinstaller](https://pyinstaller.o
 
 ```bash
 pip install pyinstaller
-pyinstaller src/main.py --onefile --name SpaceOdyssey2D
+pyinstaller src/main.py --onefile --name Interste11ar
 ```
 
-Esto generará un ejecutable en `dist/SpaceOdyssey2D`. Repite el proceso en cada plataforma para obtener los binarios nativos.
+Esto generará un ejecutable en `dist/Interste11ar`. Repite el proceso en cada plataforma para obtener los binarios nativos.
 
 ## Créditos
 
-Desarrollado por request del usuario. Si reutilizas este proyecto, ¡menciona la fuente!
+Desarrollado por Kh7Designs. 
+Desarrollado por hobby, para iniciar en la creacion de desarrollo de juegos.
+Si reutilizas este proyecto, ¡menciona la fuente!
 
