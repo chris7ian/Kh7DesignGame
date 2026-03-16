@@ -3,12 +3,21 @@ from __future__ import annotations
 import random
 from enum import Enum, auto
 from pathlib import Path
-from typing import Tuple
+from typing import Any, Tuple
 
 import pygame
 
 try:
-    from . import entities, settings, ui
+    import cv2
+    import numpy as np
+    _VIDEO_AVAILABLE = True
+except ImportError:
+    _VIDEO_AVAILABLE = False
+    cv2 = None  # type: ignore
+    np = None  # type: ignore
+
+try:
+    from . import entities, settings, ui, user_config
 except ImportError:  # pragma: no cover - fallback for direct execution
     import sys
 
@@ -18,10 +27,12 @@ except ImportError:  # pragma: no cover - fallback for direct execution
     import entities  # type: ignore  # noqa: E402
     import settings  # type: ignore  # noqa: E402
     import ui  # type: ignore  # noqa: E402
+    import user_config  # type: ignore  # noqa: E402
 
 
 class GameState(Enum):
     MENU = auto()
+    OPTIONS = auto()
     PLAYING = auto()
     PAUSED = auto()
     GAME_OVER = auto()
@@ -101,8 +112,10 @@ class Game:
     def __init__(self) -> None:
         pygame.init()
         pygame.display.set_caption("Interste11ar")
-        self.screen = pygame.display.set_mode((settings.WIDTH, settings.HEIGHT + settings.FOOTER_HEIGHT))
-        self.play_surface = pygame.Surface((settings.WIDTH, settings.HEIGHT))
+
+        self.user_config = user_config.load()
+        self._apply_viewport()
+
         self.clock = pygame.time.Clock()
         self.state = GameState.MENU
         self.stars = [
@@ -114,7 +127,8 @@ class Game:
             for _ in range(70)
         ]
 
-        icon_path = Path(__file__).resolve().parent / "icon.png"
+        # Window icon (use assets/icon.png so it’s bundled with the .app)
+        icon_path = settings.ASSETS_PATH / "icon.png"
         if icon_path.exists():
             try:
                 icon_surface = pygame.image.load(icon_path.as_posix())
@@ -144,15 +158,26 @@ class Game:
         self._reset_starfield()
         self._setup_level()
 
+        # Mini transition space <-> ground (video or fade). Videos are ~5 s each, no audio.
+        self.transition_duration = 1.0  # seconds for fade fallback when video unavailable
+        self.transition_timer = 0.0
+        self.transition_to_platformer = False
+        self.transition_use_video = False
+        self._transition_video: Any = None  # cv2.VideoCapture when using video
+        self._transition_video_frame: pygame.Surface | None = None  # current frame scaled to game size
+        self._transition_video_time = 0.0
+        self._transition_video_fps = 30.0
+
+        self.options_index = 0  # which option row is selected (0=music, 1=opacity, 2=fps, 3=resolution)
+
         self.shoot_sound = self._load_sound("laser.wav")
         self.explosion_sound = self._load_sound("explosion.wav")
         self.music_loaded = self._load_music("space_theme.ogg")
         if self.music_loaded:
+            pygame.mixer.music.set_volume(self.user_config["music_volume"])
             pygame.mixer.music.play(-1)
-        
-        # Cargar fondos
-        self.space_background = self._load_background("space_background.png")
-        self.cyberpunk_background = self._load_background("cyberpunk_background.png")
+
+        self._reload_backgrounds()
 
     def _load_sound(self, filename: str):
         path = settings.ASSETS_PATH / "sounds" / filename
@@ -169,47 +194,80 @@ class Game:
             return False
         try:
             pygame.mixer.music.load(path.as_posix())
-            pygame.mixer.music.set_volume(0.4)
+            pygame.mixer.music.set_volume(self.user_config["music_volume"])
             return True
         except pygame.error:
             return False
-    
-    def _load_background(self, filename: str) -> pygame.Surface | None:
-        """Carga una imagen de fondo y la escala al tamaño de la pantalla con opacidad"""
+
+    def _reload_backgrounds(self) -> None:
+        """Load or reload background images using current user_config opacity."""
+        opacity = self.user_config["background_opacity"]
+        self.space_background = self._load_background("space_background.png", opacity)
+        self.cyberpunk_background = self._load_background("cyberpunk_background.png", opacity)
+
+    def _load_background(self, filename: str, opacity: int | None = None) -> pygame.Surface | None:
+        """Carga una imagen de fondo y la escala al tamaño de la pantalla con opacidad."""
+        if opacity is None:
+            opacity = self.user_config.get("background_opacity", settings.BACKGROUND_OPACITY)
         path = settings.ASSETS_PATH / "images" / filename
         if not path.exists():
-            print(f"No se encontró la imagen {filename} en {path}")
             return None
         try:
             image = pygame.image.load(path.as_posix())
-            # Escalar la imagen al tamaño de la pantalla
             scaled = pygame.transform.scale(image, (settings.WIDTH, settings.HEIGHT))
-            
-            # Aplicar opacidad si la imagen tiene canal alpha, sino crear una superficie con alpha
             if scaled.get_flags() & pygame.SRCALPHA:
-                # La imagen ya tiene canal alpha, ajustar opacidad
-                scaled.set_alpha(settings.BACKGROUND_OPACITY)
+                scaled.set_alpha(opacity)
             else:
-                # Convertir a superficie con alpha y aplicar opacidad
                 temp_surface = pygame.Surface(scaled.get_size(), pygame.SRCALPHA)
                 temp_surface.blit(scaled, (0, 0))
-                temp_surface.set_alpha(settings.BACKGROUND_OPACITY)
+                temp_surface.set_alpha(opacity)
                 scaled = temp_surface
-            
-            print(f"Fondo {filename} cargado correctamente desde {path} con opacidad {settings.BACKGROUND_OPACITY}")
             return scaled
-        except pygame.error as e:
-            print(f"Error cargando imagen {filename} desde {path}: {e}")
+        except pygame.error:
             return None
 
-    def _can_reach(self, from_rect: pygame.Rect, to_rect: pygame.Rect, max_jump_height: float, max_jump_distance: float) -> bool:
-        """Verifica si se puede alcanzar una plataforma desde otra"""
-        # Calcular distancia horizontal y vertical
-        dx = abs((to_rect.centerx - from_rect.centerx))
+    def _apply_viewport(self) -> None:
+        """Apply user_config width/height to settings and recreate window and play surface."""
+        settings.WIDTH = self.user_config["width"]
+        settings.HEIGHT = self.user_config["height"]
+        self.screen = pygame.display.set_mode((settings.WIDTH, settings.HEIGHT + settings.FOOTER_HEIGHT))
+        self.play_surface = pygame.Surface((settings.WIDTH, settings.HEIGHT))
+        if hasattr(self, "player") and self.player is not None:
+            self.player.rect.centerx = max(self.player.rect.width // 2, min(settings.WIDTH - self.player.rect.width // 2, self.player.rect.centerx))
+            self.player.rect.centery = max(self.player.rect.height // 2, min(settings.HEIGHT - self.player.rect.height // 2, self.player.rect.centery))
+        if hasattr(self, "astronaut") and self.astronaut is not None:
+            ground = settings.HEIGHT - settings.GROUND_HEIGHT
+            self.astronaut.rect.x = max(0, min(settings.WIDTH - self.astronaut.rect.width, self.astronaut.rect.x))
+            self.astronaut.rect.y = min(ground - self.astronaut.rect.height, self.astronaut.rect.y)
+        if hasattr(self, "stars") and self.stars is not None:
+            self._reset_starfield()
+
+    def _can_reach(
+        self,
+        from_rect: pygame.Rect,
+        to_rect: pygame.Rect,
+        max_jump_height: float,
+        max_jump_distance: float,
+        *,
+        from_ground: bool = False,
+    ) -> bool:
+        """Verifica si se puede alcanzar una plataforma desde otra (o desde el suelo)."""
         dy = from_rect.top - to_rect.top  # Positivo si to_rect está arriba
-        
-        # Verificar si está dentro del alcance del salto
-        return dx <= max_jump_distance and dy >= 0 and dy <= max_jump_height
+        if dy < 0 or dy > max_jump_height:
+            return False
+
+        if from_ground:
+            # Desde el suelo el jugador puede correr hasta quedar debajo; solo importa la altura.
+            return True
+
+        # Distancia horizontal: gap entre el borde más cercano de cada plataforma
+        if from_rect.right <= to_rect.left:
+            dx = to_rect.left - from_rect.right
+        elif from_rect.left >= to_rect.right:
+            dx = from_rect.left - to_rect.right
+        else:
+            dx = 0  # Se solapan en x, salto casi vertical
+        return dx <= max_jump_distance
     
     def _create_platforms(self, level: int = 1) -> list[entities.Platform]:
         """Genera plataformas de forma procedural asegurando rutas alcanzables"""
@@ -304,9 +362,9 @@ class Game:
                     reachable = False
                     
                     if layer_idx == 0:
-                        # Primera capa: debe ser alcanzable desde el suelo
+                        # Primera capa: debe ser alcanzable desde el suelo (el jugador puede correr y saltar)
                         ground_rect = pygame.Rect(0, ground_level, settings.WIDTH, 1)
-                        reachable = self._can_reach(ground_rect, new_rect, max_jump_height, max_jump_distance)
+                        reachable = self._can_reach(ground_rect, new_rect, max_jump_height, max_jump_distance, from_ground=True)
                     else:
                         # Capas superiores: debe ser alcanzable desde al menos una plataforma anterior
                         for existing in platform_rects:
@@ -344,15 +402,23 @@ class Game:
         return platforms
 
     def _create_aliens(self, level_config: LevelConfig) -> None:
-        """Crea aliens en algunas plataformas según la configuración del nivel"""
+        """Crea aliens solo en plataformas alcanzables con un salto desde el suelo."""
         self.aliens.clear()
-        # Obtener todas las plataformas excepto el suelo base
-        available_platforms = [p for p in self.platforms if p.rect.y < settings.HEIGHT - settings.GROUND_HEIGHT]
-        
+        ground_level = settings.HEIGHT - settings.GROUND_HEIGHT
+        ground_rect = pygame.Rect(0, ground_level, settings.WIDTH, 1)
+        max_jump_height = (settings.ASTRONAUT_JUMP_STRENGTH ** 2) / (2 * settings.ASTRONAUT_GRAVITY)
+        max_jump_distance = max_jump_height * 1.5
+
+        # Solo plataformas que se pueden alcanzar desde el suelo en un salto (sin cadena de saltos)
+        available_platforms = [
+            p for p in self.platforms
+            if p.rect.y < ground_level
+            and self._can_reach(ground_rect, p.rect, max_jump_height, max_jump_distance, from_ground=True)
+        ]
+
         if not available_platforms:
             return
-        
-        # Seleccionar plataformas aleatorias para aliens
+
         num_aliens = min(level_config.alien_count, len(available_platforms))
         selected_platforms = random.sample(available_platforms, num_aliens)
         
@@ -399,6 +465,9 @@ class Game:
         self.time_accumulator = 0.0
         self.level = 1
         self.level_complete_timer = 0.0
+        self.transition_timer = 0.0
+        self.transition_use_video = False
+        self._close_transition_video()
         self._reset_starfield()
         self._setup_level()
 
@@ -409,9 +478,78 @@ class Game:
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     self.quit()
+                if event.key == pygame.K_o:
+                    self.options_index = 0
+                    self.state = GameState.OPTIONS
                 if event.key in (pygame.K_RETURN, pygame.K_SPACE):
                     self.reset()
                     self.state = GameState.PLAYING
+
+    def handle_options_input(self) -> None:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.quit()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE or event.key == pygame.K_BACKSPACE:
+                    user_config.save(self.user_config)
+                    self.state = GameState.MENU
+                    return
+                if event.key in (pygame.K_UP, pygame.K_w):
+                    self.options_index = (self.options_index - 1) % 4
+                if event.key in (pygame.K_DOWN, pygame.K_s):
+                    self.options_index = (self.options_index + 1) % 4
+                if event.key in (pygame.K_LEFT, pygame.K_a):
+                    self._options_change(-1)
+                if event.key in (pygame.K_RIGHT, pygame.K_d):
+                    self._options_change(1)
+
+    def _options_change(self, delta: int) -> None:
+        if self.options_index == 0:  # music volume
+            step = 0.1
+            self.user_config["music_volume"] = max(0.0, min(1.0,
+                self.user_config["music_volume"] + delta * step))
+            if self.music_loaded:
+                pygame.mixer.music.set_volume(self.user_config["music_volume"])
+        elif self.options_index == 1:  # background opacity
+            step = 15
+            self.user_config["background_opacity"] = max(50, min(255,
+                self.user_config["background_opacity"] + delta * step))
+            self._reload_backgrounds()
+        elif self.options_index == 2:  # fps_limit
+            choices = user_config.FPS_CHOICES
+            idx = choices.index(self.user_config["fps_limit"])
+            idx = max(0, min(len(choices) - 1, idx + delta))
+            self.user_config["fps_limit"] = choices[idx]
+        else:  # resolution (viewport)
+            choices = user_config.RESOLUTION_CHOICES
+            current = (self.user_config["width"], self.user_config["height"])
+            try:
+                idx = choices.index(current)
+            except ValueError:
+                idx = 0
+            idx = max(0, min(len(choices) - 1, idx + delta))
+            w, h = choices[idx]
+            self.user_config["width"], self.user_config["height"] = w, h
+            self._apply_viewport()
+            self._reload_backgrounds()
+
+    def _draw_options(self, surface: pygame.Surface) -> None:
+        """Draw the options menu with selectable rows."""
+        cx, cy = settings.WIDTH // 2, settings.HEIGHT // 2
+        self.hud.draw_text(surface, "Opciones", (cx, cy - 100), size=28, center=True)
+        self.hud.draw_text(surface, "Flechas / A-D = cambiar   |   Esc = volver", (cx, cy - 60), size=14, center=True)
+        row_h = 44
+        labels = [
+            f"Musica: {int(self.user_config['music_volume'] * 100)}%",
+            f"Opacidad fondo: {self.user_config['background_opacity']}",
+            f"FPS: {self.user_config['fps_limit']}",
+            f"Ventana: {self.user_config['width']} x {self.user_config['height']}",
+        ]
+        for i, label in enumerate(labels):
+            y = cy - 20 + i * row_h
+            color = (150, 220, 255) if i == self.options_index else settings.COLOR_TEXT
+            prefix = "> " if i == self.options_index else "  "
+            self.hud.draw_text(surface, prefix + label, (cx, y), size=20, center=True, color=color)
 
     def handle_paused_input(self) -> None:
         for event in pygame.event.get():
@@ -442,36 +580,77 @@ class Game:
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     self.state = GameState.PAUSED
-                # Cambiar entre nave y astronauta con la tecla E
-                if event.key == pygame.K_e:
+                # Cambiar entre nave y astronauta con la tecla E (inicia transición: video o fade)
+                if event.key == pygame.K_e and self.transition_timer <= 0 and not self.transition_use_video:
                     if self.game_mode == GameMode.SHIP:
-                        # Solo permitir bajar si la nave está cerca del suelo
                         ground_level = settings.HEIGHT - settings.GROUND_HEIGHT
-                        # Verificar si la nave está cerca del suelo
-                        # La nave puede estar hasta LANDING_DISTANCE píxeles arriba del suelo
-                        # o en el límite inferior de la pantalla (tocando el suelo visualmente)
                         player_bottom = self.player.rect.bottom
                         is_near_ground = (ground_level - settings.LANDING_DISTANCE <= player_bottom <= settings.HEIGHT)
-                        
                         if is_near_ground:
-                            # Cambiar a modo plataformas - posicionar astronauta cerca de la nave
-                            self.astronaut.rect.x = self.player.rect.centerx
-                            self.astronaut.rect.y = ground_level - self.astronaut.rect.height
-                            self.astronaut.velocity = pygame.math.Vector2(0, 0)
-                            # Limpiar meteoritos y láseres al cambiar a modo plataformas (están en el espacio)
-                            self.meteor_spawner.meteors.clear()
-                            self.player.lasers.clear()
-                            self.game_mode = GameMode.PLATFORMER
+                            self._start_transition(to_platformer=True)
                     else:
-                        # Cambiar a modo nave - solo si el astronauta está cerca de la nave
-                        # Calcular distancia entre el astronauta y la nave
                         astronaut_center = pygame.math.Vector2(self.astronaut.rect.centerx, self.astronaut.rect.centery)
                         ship_center = pygame.math.Vector2(self.player.rect.centerx, self.player.rect.centery)
                         distance = (astronaut_center - ship_center).length()
-                        
                         if distance <= settings.BOARDING_DISTANCE:
-                            # Cambiar a modo nave
-                            self.game_mode = GameMode.SHIP
+                            self._start_transition(to_platformer=False)
+
+    def _close_transition_video(self) -> None:
+        """Release video capture and clear frame."""
+        if self._transition_video is not None:
+            try:
+                self._transition_video.release()
+            except Exception:
+                pass
+            self._transition_video = None
+        self._transition_video_frame = None
+
+    def _start_transition(self, to_platformer: bool) -> None:
+        """Start landing/takeoff transition: play 5 s video (no audio) or fallback fade."""
+        self.transition_to_platformer = to_platformer
+        if _VIDEO_AVAILABLE and cv2 is not None:
+            name = "landing.mp4" if to_platformer else "takeoff.mp4"
+            path = settings.ASSETS_PATH / "videos" / name
+            if path.exists():
+                cap = cv2.VideoCapture(str(path))
+                if cap.isOpened():
+                    self._transition_video = cap
+                    self._transition_video_fps = max(1.0, cap.get(cv2.CAP_PROP_FPS) or 30.0)
+                    self._transition_video_time = 0.0
+                    self._read_next_video_frame()
+                    if self._transition_video_frame is not None:
+                        self.transition_use_video = True
+                        self.transition_timer = 0.0
+                        return
+                self._close_transition_video()
+        self.transition_use_video = False
+        self.transition_timer = self.transition_duration
+
+    def _read_next_video_frame(self) -> bool:
+        """Read next frame from transition video into _transition_video_frame. Returns True if got a frame."""
+        if self._transition_video is None or not _VIDEO_AVAILABLE:
+            return False
+        ret, frame = self._transition_video.read()
+        if not ret or frame is None:
+            return False
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame_rgb = cv2.resize(frame_rgb, (settings.WIDTH, settings.HEIGHT))
+        surf = pygame.image.frombuffer(frame_rgb.tobytes(), (settings.WIDTH, settings.HEIGHT), "RGB")
+        self._transition_video_frame = surf
+        return True
+
+    def _perform_mode_switch(self, to_platformer: bool) -> None:
+        """Apply the actual ship <-> platformer switch (called at midpoint of transition or when video ends)."""
+        if to_platformer:
+            ground_level = settings.HEIGHT - settings.GROUND_HEIGHT
+            self.astronaut.rect.x = self.player.rect.centerx
+            self.astronaut.rect.y = ground_level - self.astronaut.rect.height
+            self.astronaut.velocity = pygame.math.Vector2(0, 0)
+            self.meteor_spawner.meteors.clear()
+            self.player.lasers.clear()
+            self.game_mode = GameMode.PLATFORMER
+        else:
+            self.game_mode = GameMode.SHIP
 
     def handle_ship_input(self) -> pygame.math.Vector2:
         """Maneja input para modo nave"""
@@ -501,9 +680,29 @@ class Game:
         return move_left, move_right, jump, shoot
 
     def update_gameplay(self, dt: float) -> None:
-        # Manejar eventos comunes primero
         self.handle_gameplay_events()
-        
+
+        # Transición espacio <-> suelo: video (landing/takeoff) o fade
+        if self.transition_use_video and self._transition_video is not None:
+            self._transition_video_time += dt
+            frame_interval = 1.0 / self._transition_video_fps
+            while self._transition_video_time >= frame_interval:
+                self._transition_video_time -= frame_interval
+                if not self._read_next_video_frame():
+                    self._perform_mode_switch(self.transition_to_platformer)
+                    self._close_transition_video()
+                    self.transition_use_video = False
+                    break
+            return
+        if self.transition_timer > 0:
+            prev = self.transition_timer
+            self.transition_timer -= dt
+            if prev > self.transition_duration / 2 and self.transition_timer <= self.transition_duration / 2:
+                self._perform_mode_switch(self.transition_to_platformer)
+            if self.transition_timer < 0:
+                self.transition_timer = 0
+            return
+
         if self.game_mode == GameMode.SHIP:
             directions = self.handle_ship_input()
             self.player.update(dt, directions)
@@ -763,8 +962,10 @@ class Game:
                 target_surface,
                 "Interste11ar",
                 "Kh7 Designs presents",
-                "Presiona Enter o Espacio para comenzar",
+                "Enter / Espacio = Jugar   |   O = Opciones",
             )
+        elif self.state == GameState.OPTIONS:
+            self._draw_options(target_surface)
         elif self.state == GameState.PLAYING:
             if self.game_mode == GameMode.SHIP:
                 self.player.draw(target_surface)
@@ -823,10 +1024,33 @@ class Game:
                 f"Puntuación final: {self.score} | Enter/Espacio = Reiniciar",
             )
 
-        self.screen.blit(self.play_surface, (0, 0))
-        self.draw_footer()
+        # Durante transición por video: mostrar frame del video en lugar del juego
+        if self.state == GameState.PLAYING and self.transition_use_video and self._transition_video_frame is not None:
+            self.screen.blit(self._transition_video_frame, (0, 0))
+            footer_rect = pygame.Rect(0, settings.HEIGHT, settings.WIDTH, settings.FOOTER_HEIGHT)
+            pygame.draw.rect(self.screen, (0, 0, 0), footer_rect)
+        else:
+            self.screen.blit(self.play_surface, (0, 0))
+            self.draw_footer()
 
-        if self.state == GameState.PLAYING:
+        # Overlay de transición por fade (cuando no hay video)
+        if self.state == GameState.PLAYING and self.transition_timer > 0 and not self.transition_use_video:
+            half = self.transition_duration / 2
+            if self.transition_timer > half:
+                alpha = int((1.0 - self.transition_timer / half) * 255)  # fade out
+            else:
+                alpha = int((self.transition_timer / half) * 255)  # fade in
+            alpha = max(0, min(255, alpha))
+            if alpha > 0:
+                overlay = pygame.Surface((settings.WIDTH, settings.HEIGHT + settings.FOOTER_HEIGHT), pygame.SRCALPHA)
+                overlay.fill((0, 0, 0, alpha))
+                self.screen.blit(overlay, (0, 0))
+            # Texto cuando la pantalla está oscura (mitad de la transición)
+            if 0.25 < self.transition_timer < 0.75:
+                msg = "Aterrizando..." if self.transition_to_platformer else "Abordando..."
+                self.hud.draw_text(self.screen, msg, (settings.WIDTH // 2, settings.HEIGHT // 2), size=22, center=True, color=(200, 220, 255))
+
+        if self.state == GameState.PLAYING and not (self.transition_use_video and self._transition_video_frame is not None):
             # Dibujar minimapa primero para que los textos queden encima
             self.draw_minimap()
             
@@ -887,11 +1111,14 @@ class Game:
 
     def run(self) -> None:
         while True:
-            dt_ms = self.clock.tick(settings.FPS)
+            fps = self.user_config.get("fps_limit", settings.FPS)
+            dt_ms = self.clock.tick(fps)
             dt = dt_ms / 1000.0
 
             if self.state == GameState.MENU:
                 self.handle_menu_input()
+            elif self.state == GameState.OPTIONS:
+                self.handle_options_input()
             elif self.state == GameState.PLAYING:
                 self.update_gameplay(dt)
             elif self.state == GameState.PAUSED:
