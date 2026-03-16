@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import pathlib
+import sys
 
-# Dimensiones de la ventana
-WIDTH = 800
-HEIGHT = 600
+# Dimensiones de la ventana (16:9 widescreen por defecto)
+WIDTH = 1280
+HEIGHT = 720
+
+
+def _base_path() -> pathlib.Path:
+    """Project root; when frozen (PyInstaller), use the bundle extraction path."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return pathlib.Path(sys._MEIPASS)
+    return pathlib.Path(__file__).resolve().parent.parent
 
 # Colores
 COLOR_BG = (5, 5, 20)
@@ -78,7 +86,7 @@ DIFFICULTY_STEP = 0.02  # reducción del intervalo de generación
 DIFFICULTY_MIN_INTERVAL = 0.35
 
 # Hud / fuentes
-BASE_PATH = pathlib.Path(__file__).resolve().parent.parent
+BASE_PATH = _base_path()
 ASSETS_PATH = BASE_PATH / "assets"
 FONTS_PATH = ASSETS_PATH / "fonts"
 IMAGES_PATH = ASSETS_PATH / "images"
